@@ -18,6 +18,45 @@ export function CinemaStudio() {
         aperture: "f/1.4"
     };
 
+    const sanitizeMediaUrl = (value) => {
+        if (typeof value !== 'string' || !value.trim()) return '';
+        try {
+            const parsed = new URL(value, window.location.origin);
+            const allowedProtocols = ['http:', 'https:', 'blob:', 'data:'];
+            return allowedProtocols.includes(parsed.protocol) ? parsed.href : '';
+        } catch {
+            return '';
+        }
+    };
+
+    const sanitizeText = (value, maxLength = 120) => {
+        if (typeof value !== 'string') return '';
+        return value
+            .replace(/[\u0000-\u001F\u007F]/g, ' ')
+            .trim()
+            .slice(0, maxLength);
+    };
+
+    const normalizeHistoryEntry = (entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const safeUrl = sanitizeMediaUrl(entry.url);
+        if (!safeUrl) return null;
+        const rawSettings = entry.settings && typeof entry.settings === 'object' ? entry.settings : {};
+        return {
+            url: safeUrl,
+            timestamp: Number.isFinite(Number(entry.timestamp)) ? Number(entry.timestamp) : Date.now(),
+            settings: {
+                prompt: sanitizeText(rawSettings.prompt || '', 2000),
+                camera: sanitizeText(rawSettings.camera || Object.keys(CAMERA_MAP)[0], 64),
+                lens: sanitizeText(rawSettings.lens || Object.keys(LENS_MAP)[0], 64),
+                focal: Number.isFinite(Number(rawSettings.focal)) ? Number(rawSettings.focal) : 35,
+                aperture: sanitizeText(rawSettings.aperture || 'f/1.4', 32),
+                aspect_ratio: sanitizeText(rawSettings.aspect_ratio || '16:9', 16),
+                resolution: sanitizeText(rawSettings.resolution || '2K', 16)
+            }
+        };
+    };
+
     // ==========================================
     // 1. HERO SECTION (Empty State)
     // ==========================================
@@ -296,15 +335,27 @@ export function CinemaStudio() {
     const renderHistory = () => {
         historyList.innerHTML = '';
         generationHistory.forEach((entry, idx) => {
+            const safeEntryUrl = sanitizeMediaUrl(entry.url);
+            if (!safeEntryUrl) return;
+
             const thumb = document.createElement('div');
             thumb.className = `relative group/thumb cursor-pointer rounded-lg overflow-hidden border-2 transition-all duration-300 aspect-square ${idx === 0 ? 'border-[#d9ff00] shadow-glow-sm' : 'border-white/10 hover:border-white/30'}`;
 
-            thumb.innerHTML = `
-                <img src="${entry.url}" class="w-full h-full object-cover opacity-80 group-hover/thumb:opacity-100 transition-opacity">
-                <div class="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
-                    <span class="text-[8px] font-bold text-white uppercase">Load</span>
-                </div>
-            `;
+            const image = document.createElement('img');
+            image.src = safeEntryUrl;
+            image.alt = sanitizeText(entry.settings?.prompt || 'Generated cinema shot', 60) || 'Generated cinema shot';
+            image.className = 'w-full h-full object-cover opacity-80 group-hover/thumb:opacity-100 transition-opacity';
+
+            const overlay = document.createElement('div');
+            overlay.className = 'absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center';
+
+            const label = document.createElement('span');
+            label.className = 'text-[8px] font-bold text-white uppercase';
+            label.textContent = 'Load';
+
+            overlay.appendChild(label);
+            thumb.appendChild(image);
+            thumb.appendChild(overlay);
 
             thumb.onclick = () => loadHistoryItem(entry, thumb);
             historyList.appendChild(thumb);
@@ -312,7 +363,10 @@ export function CinemaStudio() {
     };
 
     const addToHistory = (entry) => {
-        generationHistory.unshift(entry);
+        const normalizedEntry = normalizeHistoryEntry(entry);
+        if (!normalizedEntry) return;
+
+        generationHistory.unshift(normalizedEntry);
         localStorage.setItem('cinema_history', JSON.stringify(generationHistory.slice(0, 50)));
         renderHistory();
     };
@@ -347,7 +401,12 @@ export function CinemaStudio() {
     };
 
     const showCanvas = (url) => {
-        resultImg.src = url;
+        const safeUrl = sanitizeMediaUrl(url);
+        if (!safeUrl) {
+            throw new Error('Invalid image URL');
+        }
+
+        resultImg.src = safeUrl;
 
         // Hide Input UI
         heroSection.classList.add('opacity-0', 'pointer-events-none', 'scale-95');
@@ -378,7 +437,10 @@ export function CinemaStudio() {
     try {
         const saved = JSON.parse(localStorage.getItem('cinema_history') || '[]');
         if (saved.length > 0) {
-            saved.forEach(e => generationHistory.push(e));
+            saved.forEach((e) => {
+                const normalized = normalizeHistoryEntry(e);
+                if (normalized) generationHistory.push(normalized);
+            });
             renderHistory();
         }
     } catch (e) { }
@@ -395,18 +457,20 @@ export function CinemaStudio() {
 
     downloadBtn.onclick = async () => {
         try {
-            const response = await fetch(resultImg.src);
+            const safeUrl = sanitizeMediaUrl(resultImg.src);
+            if (!safeUrl) throw new Error('Invalid image URL');
+
+            const response = await fetch(safeUrl);
             const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = blobUrl;
             a.download = `cinema-shot-${Date.now()}.jpg`;
-            document.body.appendChild(a);
             a.click();
-            document.body.removeChild(a);
             URL.revokeObjectURL(blobUrl);
         } catch (err) {
-            window.open(resultImg.src, '_blank');
+            const fallbackUrl = sanitizeMediaUrl(resultImg.src);
+            if (fallbackUrl) window.open(fallbackUrl, '_blank');
         }
     };
 

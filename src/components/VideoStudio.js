@@ -18,6 +18,50 @@ export function VideoStudio() {
     let uploadedImageUrl = null;
     let imageMode = false; // false = t2v models, true = i2v models
 
+    const sanitizeMediaUrl = (value) => {
+        if (typeof value !== 'string' || !value.trim()) return '';
+        try {
+            const parsed = new URL(value, window.location.origin);
+            const allowedProtocols = ['http:', 'https:', 'blob:', 'data:'];
+            return allowedProtocols.includes(parsed.protocol) ? parsed.href : '';
+        } catch {
+            return '';
+        }
+    };
+
+    const sanitizeText = (value, maxLength = 120) => {
+        if (typeof value !== 'string') return '';
+        return value
+            .replace(/[\u0000-\u001F\u007F]/g, ' ')
+            .trim()
+            .slice(0, maxLength);
+    };
+
+    const sanitizeFilename = (value, fallback = 'video-clip.mp4') => {
+        const base = sanitizeText(value, 120)
+            .replace(/[<>:"/\\|?*]+/g, '-')
+            .replace(/\s+/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+        if (!base) return fallback;
+        return /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : `${base}.mp4`;
+    };
+
+    const normalizeHistoryEntry = (entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const safeUrl = sanitizeMediaUrl(entry.url);
+        if (!safeUrl) return null;
+        return {
+            id: sanitizeText(String(entry.id ?? Date.now()), 64),
+            url: safeUrl,
+            prompt: sanitizeText(entry.prompt || '', 1000),
+            model: sanitizeText(entry.model || '', 128),
+            aspect_ratio: sanitizeText(entry.aspect_ratio || '', 32),
+            duration: Number.isFinite(Number(entry.duration)) ? Number(entry.duration) : 0,
+            timestamp: sanitizeText(entry.timestamp || new Date().toISOString(), 64)
+        };
+    };
+
     const getCurrentModels = () => imageMode ? i2vModels : t2vModels;
     const getCurrentAspectRatios = (id) => imageMode ? getAspectRatiosForI2VModel(id) : getAspectRatiosForVideoModel(id);
     const getCurrentDurations = (id) => imageMode ? getDurationsForI2VModel(id) : getDurationsForModel(id);
@@ -414,10 +458,15 @@ export function VideoStudio() {
 
     // --- Helper: Show video in canvas ---
     const showVideoInCanvas = (videoUrl) => {
+        const safeVideoUrl = sanitizeMediaUrl(videoUrl);
+        if (!safeVideoUrl) {
+            throw new Error('Invalid video URL');
+        }
+
         hero.classList.add('hidden');
         promptWrapper.classList.add('hidden');
 
-        resultVideo.src = videoUrl;
+        resultVideo.src = safeVideoUrl;
         resultVideo.onloadeddata = () => {
             canvas.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-10', 'scale-95');
             canvas.classList.add('opacity-100', 'translate-y-0', 'scale-100');
@@ -428,7 +477,10 @@ export function VideoStudio() {
 
     // --- Helper: Add to history ---
     const addToHistory = (entry) => {
-        generationHistory.unshift(entry);
+        const normalizedEntry = normalizeHistoryEntry(entry);
+        if (!normalizedEntry) return;
+
+        generationHistory.unshift(normalizedEntry);
         localStorage.setItem('video_history', JSON.stringify(generationHistory.slice(0, 30)));
         historySidebar.classList.remove('translate-x-full', 'opacity-0');
         historySidebar.classList.add('translate-x-0', 'opacity-100');
@@ -438,24 +490,37 @@ export function VideoStudio() {
     const renderHistory = () => {
         historyList.innerHTML = '';
         generationHistory.forEach((entry, idx) => {
+            const safeEntryUrl = sanitizeMediaUrl(entry.url);
+            if (!safeEntryUrl) return;
+
             const thumb = document.createElement('div');
             thumb.className = `relative group/thumb cursor-pointer rounded-xl overflow-hidden border-2 transition-all duration-300 ${idx === 0 ? 'border-primary shadow-glow' : 'border-white/10 hover:border-white/30'}`;
 
-            thumb.innerHTML = `
-                <video src="${entry.url}" preload="metadata" muted class="w-full aspect-square object-cover"></video>
-                <div class="absolute inset-0 bg-black/60 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center gap-1">
-                    <button class="hist-download p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform" title="Download">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                    </button>
-                </div>
-            `;
+            const thumbVideo = document.createElement('video');
+            thumbVideo.src = safeEntryUrl;
+            thumbVideo.preload = 'metadata';
+            thumbVideo.muted = true;
+            thumbVideo.className = 'w-full aspect-square object-cover';
+
+            const overlay = document.createElement('div');
+            overlay.className = 'absolute inset-0 bg-black/60 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center gap-1';
+
+            const downloadThumbBtn = document.createElement('button');
+            downloadThumbBtn.className = 'hist-download p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform';
+            downloadThumbBtn.title = 'Download';
+            downloadThumbBtn.type = 'button';
+            downloadThumbBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>';
+
+            overlay.appendChild(downloadThumbBtn);
+            thumb.appendChild(thumbVideo);
+            thumb.appendChild(overlay);
 
             thumb.onclick = (e) => {
                 if (e.target.closest('.hist-download')) {
-                    downloadFile(entry.url, `video-${entry.id || idx}.mp4`);
+                    downloadFile(safeEntryUrl, sanitizeFilename(`video-${entry.id || idx}.mp4`));
                     return;
                 }
-                showVideoInCanvas(entry.url);
+                showVideoInCanvas(safeEntryUrl);
                 historyList.querySelectorAll('div').forEach(t => {
                     t.classList.remove('border-primary', 'shadow-glow');
                     t.classList.add('border-white/10');
@@ -470,19 +535,23 @@ export function VideoStudio() {
 
     // --- Helper: Download file ---
     const downloadFile = async (url, filename) => {
+        const safeUrl = sanitizeMediaUrl(url);
+        const safeFilename = sanitizeFilename(filename);
+        if (!safeUrl) {
+            throw new Error('Invalid video URL');
+        }
+
         try {
-            const response = await fetch(url);
+            const response = await fetch(safeUrl);
             const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = blobUrl;
-            a.download = filename;
-            document.body.appendChild(a);
+            a.download = safeFilename;
             a.click();
-            document.body.removeChild(a);
             URL.revokeObjectURL(blobUrl);
         } catch (err) {
-            window.open(url, '_blank');
+            window.open(safeUrl, '_blank');
         }
     };
 
@@ -490,7 +559,10 @@ export function VideoStudio() {
     try {
         const saved = JSON.parse(localStorage.getItem('video_history') || '[]');
         if (saved.length > 0) {
-            saved.forEach(e => generationHistory.push(e));
+            saved.forEach((e) => {
+                const normalized = normalizeHistoryEntry(e);
+                if (normalized) generationHistory.push(normalized);
+            });
             historySidebar.classList.remove('translate-x-full', 'opacity-0');
             historySidebar.classList.add('translate-x-0', 'opacity-100');
             renderHistory();
@@ -502,7 +574,7 @@ export function VideoStudio() {
         const current = resultVideo.src;
         if (current) {
             const entry = generationHistory.find(e => e.url === current);
-            downloadFile(current, `video-${entry?.id || 'clip'}.mp4`);
+            downloadFile(current, sanitizeFilename(`video-${entry?.id || 'clip'}.mp4`));
         }
     };
 
@@ -594,7 +666,8 @@ export function VideoStudio() {
             }
         } catch (e) {
             console.error(e);
-            generateBtn.innerHTML = `Error: ${e.message.slice(0, 40)}`;
+            const errorMessage = sanitizeText(e?.message || 'Unknown error', 40);
+            generateBtn.textContent = `Error: ${errorMessage}`;
             setTimeout(() => {
                 generateBtn.innerHTML = `Generate ✨`;
                 generateBtn.disabled = false;

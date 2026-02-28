@@ -20,6 +20,49 @@ export function ImageStudio() {
     let uploadedImageUrls = []; // array of uploaded image URLs (multi-image support)
     let imageMode = false; // false = t2i models, true = i2i models
 
+    const sanitizeImageUrl = (value) => {
+        if (typeof value !== 'string' || !value.trim()) return '';
+        try {
+            const parsed = new URL(value, window.location.origin);
+            const allowedProtocols = ['http:', 'https:', 'blob:', 'data:'];
+            return allowedProtocols.includes(parsed.protocol) ? parsed.href : '';
+        } catch {
+            return '';
+        }
+    };
+
+    const sanitizeText = (value, maxLength = 120) => {
+        if (typeof value !== 'string') return '';
+        return value
+            .replace(/[\u0000-\u001F\u007F]/g, ' ')
+            .trim()
+            .slice(0, maxLength);
+    };
+
+    const sanitizeFilename = (value, fallback = 'muapi-image.jpg') => {
+        const base = sanitizeText(value, 120)
+            .replace(/[<>:"/\\|?*]+/g, '-')
+            .replace(/\s+/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+        if (!base) return fallback;
+        return /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : `${base}.jpg`;
+    };
+
+    const normalizeHistoryEntry = (entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const safeUrl = sanitizeImageUrl(entry.url);
+        if (!safeUrl) return null;
+        return {
+            id: sanitizeText(String(entry.id ?? Date.now()), 64),
+            url: safeUrl,
+            prompt: sanitizeText(entry.prompt || '', 1000),
+            model: sanitizeText(entry.model || '', 128),
+            aspect_ratio: sanitizeText(entry.aspect_ratio || '', 32),
+            timestamp: sanitizeText(entry.timestamp || new Date().toISOString(), 64)
+        };
+    };
+
     const getCurrentModels = () => imageMode ? i2iModels : t2iModels;
     const getCurrentAspectRatios = (id) => imageMode ? getAspectRatiosForI2IModel(id) : getAspectRatiosForModel(id);
     const getCurrentResolutions = (id) => imageMode ? getResolutionsForI2IModel(id) : getResolutionsForModel(id);
@@ -412,11 +455,16 @@ export function ImageStudio() {
 
     // --- Helper: Show image in canvas ---
     const showImageInCanvas = (imageUrl) => {
+        const safeImageUrl = sanitizeImageUrl(imageUrl);
+        if (!safeImageUrl) {
+            throw new Error('Invalid image URL');
+        }
+
         // Fully hide hero and prompt
         hero.classList.add('hidden');
         promptWrapper.classList.add('hidden');
 
-        resultImg.src = imageUrl;
+        resultImg.src = safeImageUrl;
         resultImg.onload = () => {
             canvas.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-10', 'scale-95');
             canvas.classList.add('opacity-100', 'translate-y-0', 'scale-100');
@@ -427,7 +475,10 @@ export function ImageStudio() {
 
     // --- Helper: Add to history ---
     const addToHistory = (entry) => {
-        generationHistory.unshift(entry);
+        const normalizedEntry = normalizeHistoryEntry(entry);
+        if (!normalizedEntry) return;
+
+        generationHistory.unshift(normalizedEntry);
 
         // Save to localStorage
         localStorage.setItem('muapi_history', JSON.stringify(generationHistory.slice(0, 50)));
@@ -442,24 +493,38 @@ export function ImageStudio() {
     const renderHistory = () => {
         historyList.innerHTML = '';
         generationHistory.forEach((entry, idx) => {
+            const safeEntryUrl = sanitizeImageUrl(entry.url);
+            if (!safeEntryUrl) return;
+
             const thumb = document.createElement('div');
             thumb.className = `relative group/thumb cursor-pointer rounded-xl overflow-hidden border-2 transition-all duration-300 ${idx === 0 ? 'border-primary shadow-glow' : 'border-white/10 hover:border-white/30'}`;
 
-            thumb.innerHTML = `
-                <img src="${entry.url}" alt="${entry.prompt?.substring(0, 30) || 'Generated'}" class="w-full aspect-square object-cover">
-                <div class="absolute inset-0 bg-black/60 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center gap-1">
-                    <button class="hist-download p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform" title="Download">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                    </button>
-                </div>
-            `;
+            const image = document.createElement('img');
+            image.src = safeEntryUrl;
+            image.alt = typeof entry.prompt === 'string' && entry.prompt.trim()
+                ? sanitizeText(entry.prompt, 30)
+                : 'Generated';
+            image.className = 'w-full aspect-square object-cover';
+
+            const overlay = document.createElement('div');
+            overlay.className = 'absolute inset-0 bg-black/60 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center gap-1';
+
+            const downloadThumbBtn = document.createElement('button');
+            downloadThumbBtn.className = 'hist-download p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform';
+            downloadThumbBtn.title = 'Download';
+            downloadThumbBtn.type = 'button';
+            downloadThumbBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>';
+
+            overlay.appendChild(downloadThumbBtn);
+            thumb.appendChild(image);
+            thumb.appendChild(overlay);
 
             thumb.onclick = (e) => {
                 if (e.target.closest('.hist-download')) {
-                    downloadImage(entry.url, `muapi-${entry.id || idx}.jpg`);
+                    downloadImage(safeEntryUrl, sanitizeFilename(`muapi-${entry.id || idx}.jpg`));
                     return;
                 }
-                showImageInCanvas(entry.url);
+                showImageInCanvas(safeEntryUrl);
                 // Update active border
                 historyList.querySelectorAll('div').forEach(t => {
                     t.classList.remove('border-primary', 'shadow-glow');
@@ -475,20 +540,24 @@ export function ImageStudio() {
 
     // --- Helper: Download image ---
     const downloadImage = async (url, filename) => {
+        const safeUrl = sanitizeImageUrl(url);
+        const safeFilename = sanitizeFilename(filename);
+        if (!safeUrl) {
+            throw new Error('Invalid image URL');
+        }
+
         try {
-            const response = await fetch(url);
+            const response = await fetch(safeUrl);
             const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = blobUrl;
-            a.download = filename;
-            document.body.appendChild(a);
+            a.download = safeFilename;
             a.click();
-            document.body.removeChild(a);
             URL.revokeObjectURL(blobUrl);
         } catch (err) {
             // Fallback: open in new tab
-            window.open(url, '_blank');
+            window.open(safeUrl, '_blank');
         }
     };
 
@@ -496,7 +565,10 @@ export function ImageStudio() {
     try {
         const saved = JSON.parse(localStorage.getItem('muapi_history') || '[]');
         if (saved.length > 0) {
-            saved.forEach(e => generationHistory.push(e));
+            saved.forEach((e) => {
+                const normalized = normalizeHistoryEntry(e);
+                if (normalized) generationHistory.push(normalized);
+            });
             historySidebar.classList.remove('translate-x-full', 'opacity-0');
             historySidebar.classList.add('translate-x-0', 'opacity-100');
             renderHistory();
@@ -508,7 +580,7 @@ export function ImageStudio() {
         const current = resultImg.src;
         if (current) {
             const entry = generationHistory.find(e => e.url === current);
-            downloadImage(current, `muapi-${entry?.id || 'image'}.jpg`);
+            downloadImage(current, sanitizeFilename(`muapi-${entry?.id || 'image'}.jpg`));
         }
     };
 
@@ -616,7 +688,8 @@ export function ImageStudio() {
             }
         } catch (e) {
             console.error(e);
-            generateBtn.innerHTML = `Error: ${e.message.slice(0, 40)}`;
+            const errorMessage = sanitizeText(e?.message || 'Unknown error', 40);
+            generateBtn.textContent = `Error: ${errorMessage}`;
             setTimeout(() => {
                 generateBtn.innerHTML = `Generate ✨`;
                 generateBtn.disabled = false;
